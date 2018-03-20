@@ -51,7 +51,7 @@
 #include "cmsis_os.h"
 
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private variables ---------------------------------------------------------*/
@@ -95,9 +95,25 @@ static void CanConfigFilter(void)
 	}
 }
 CanRxMsgTypeDef rxMsg;
+CanTxMsgTypeDef txMsg;
+int provisioned = 0;
+uint32_t my_serial;
+uint16_t my_id;
+#define CAN_CARD_GENERIC			0x1B
+#define CAN_CMD_CARDALIVE			0x04
+#define CAN_CMD_CARD_PROVISION_REQ	0x07
+#define CAN_CMD_CARD_PROVISION_RESP	0x08
 
 void HAL_CAN_RxCpltCallback(CAN_HandleTypeDef* hcan)
 {
+	if (hcan->pRxMsg->Data[1] == CAN_CMD_CARD_PROVISION_RESP) {
+		uint32_t recv_serial;
+		memcpy(&recv_serial, &hcan->pRxMsg->Data[2], sizeof(recv_serial));
+		if (recv_serial == my_serial) {
+			provisioned = 1;
+			memcpy(&my_id, &hcan->pRxMsg->Data[6], sizeof(my_id));
+		}
+	}
 	HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
 	__HAL_CAN_ENABLE_IT(hcan, CAN_IT_FMP0);
 }
@@ -138,6 +154,7 @@ int main(void)
   __HAL_RCC_CAN1_CLK_ENABLE();
   CanConfigFilter();
   hcan.pRxMsg = &rxMsg;
+  hcan.pTxMsg = &txMsg;
   //HAL_CAN_Receive_IT(&hcan, CAN_FIFO0);
   /* USER CODE END 2 */
 
@@ -288,7 +305,54 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static uint32_t
+hash_djb2 (unsigned char *input, int len)
+{
+	uint32_t hash = 5381;
+	int c;
 
+	while (len--) {
+		c = *input++;
+		hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+	}
+	return hash;
+}
+
+
+static void send_provision_msg (void)
+{
+	unsigned char uid[14] = {0};
+
+	HAL_GetUID((uint32_t*)uid);
+	my_serial = hash_djb2(uid, 12);
+
+	txMsg.DLC = 7;
+	txMsg.IDE = CAN_ID_STD;
+	txMsg.RTR = CAN_RTR_DATA;
+	txMsg.StdId = 1;
+	txMsg.Data[0] = CAN_CARD_GENERIC;
+	txMsg.Data[1] = CAN_CMD_CARD_PROVISION_REQ;
+	txMsg.Data[2] = CAN_CARD_GENERIC;
+	txMsg.Data[3] = my_serial & 0xFF;			// 8 LSB, card id
+	txMsg.Data[4] = (my_serial >> 8) & 0xFF;		// 3 MSB, card id
+	txMsg.Data[5] = (my_serial >> 16) & 0xFF;		// 3 MSB, card id
+	txMsg.Data[6] = (my_serial >> 24) & 0xFF;		// 3 MSB, card id
+	HAL_CAN_Transmit(&hcan, 100);
+}
+
+static void send_ka (void)
+{
+	txMsg.IDE = CAN_ID_STD;
+	txMsg.RTR = CAN_RTR_DATA;
+	txMsg.StdId = 1;
+	txMsg.DLC = 5;
+	txMsg.Data[0] = my_id;
+	txMsg.Data[1] = CAN_CMD_CARDALIVE;
+	txMsg.Data[2] = CAN_CARD_GENERIC;
+	txMsg.Data[3] = 0x02; // major ver
+	txMsg.Data[4] = 0x03; // minor ver
+	HAL_CAN_Transmit(&hcan, 100);
+}
 /* USER CODE END 4 */
 
 /* StartDefaultTask function */
@@ -296,16 +360,16 @@ void StartDefaultTask(void const * argument)
 {
 
   /* USER CODE BEGIN 5 */
-  /* Infinite loop */
-  HAL_CAN_Receive_IT(&hcan, CAN_FIFO0);
-  for(;;)
-  {
-	//HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-	//if (HAL_OK == HAL_CAN_Receive(&hcan, CAN_FIFO0, 100)) {
-	//	HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-	//}
-    osDelay(100);
-  }
+	HAL_CAN_Receive_IT(&hcan, CAN_FIFO0);
+	while(1) {
+		if (!provisioned) {
+			send_provision_msg();
+		} else {
+			send_ka();
+		}
+		osDelay(1000);
+	}
+
   /* USER CODE END 5 */ 
 }
 
